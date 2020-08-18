@@ -46,6 +46,7 @@ def authorize(
     try:
         intent = client.PaymentIntent.create(
             payment_method=payment_information.token,
+            payment_method_types=['card', 'ideal'],  # TODO: Get from additional data
             amount=stripe_amount,
             currency=currency,
             confirmation_method="manual",
@@ -94,11 +95,16 @@ def capture(payment_information: PaymentData, config: GatewayConfig) -> GatewayR
     return response
 
 
-def confirm(payment_information: PaymentData, config: GatewayConfig) -> GatewayResponse:
+def confirm(
+        payment_information: PaymentData,
+        config: GatewayConfig
+) -> GatewayResponse:
     client = _get_client(**config.connection_params)
     try:
-        intent = client.PaymentIntent(id=payment_information.token)
-        intent.confirm()
+        intent = client.PaymentIntent.retrieve(id=payment_information.token)
+        if not intent or not intent.status == "succeeded":
+            intent = client.PaymentIntent(id=payment_information.token)
+            intent.confirm()
     except stripe.error.StripeError as exc:
         response = _error_response(
             kind=TransactionKind.CONFIRM, exc=exc, payment_info=payment_information
@@ -174,6 +180,12 @@ def list_client_sources(
     ]
 
 
+def confirm_payment(
+    payment_information: PaymentData, config: GatewayConfig
+) -> GatewayResponse:
+    return confirm(payment_information, config)
+
+
 def process_payment(
     payment_information: PaymentData, config: GatewayConfig
 ) -> GatewayResponse:
@@ -230,14 +242,22 @@ def _success_response(
 def fill_card_details(intent: stripe.PaymentIntent, response: GatewayResponse):
     charges = intent.charges["data"]
     if charges:
-        card = intent.charges["data"][-1]["payment_method_details"]["card"]
-        brand = card["brand"] or ""
+        card = intent.charges["data"][-1]["payment_method_details"].get("card")
+        if card:
+            brand = card["brand"] or ""
+            response.card_info = PaymentMethodInfo(
+                last_4=card["last4"],
+                exp_year=card["exp_year"],
+                exp_month=card["exp_month"],
+                brand=brand.lower(),
+                type="card",
+            )
+        ideal = intent.charges["data"][-1]["payment_method_details"].get("ideal")
+        if ideal:
+            brand = ideal["brand"] or ""
+            response.card_info = PaymentMethodInfo(
+                brand=brand.lower(),
+                type="bank",
+            )
 
-        response.payment_method_info = PaymentMethodInfo(
-            last_4=card["last4"],
-            exp_year=card["exp_year"],
-            exp_month=card["exp_month"],
-            brand=brand.lower(),
-            type="card",
-        )
     return response
